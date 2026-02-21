@@ -149,22 +149,40 @@ def handler(job):
     for i, prompt_text in enumerate(prompts.get("male", [])):
         tasks.append(("male", f"male_{i + 1}.png", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(dir="/runpod-volume") as tmpdir:
         generated = []  # (category, filename, filepath)
         warnings = []
 
+        # --- Phase 1: Submit ALL workflows to ComfyUI queue at once ---
+        submitted = []  # (category, filename, prompt_id)
         for idx, (category, filename, prompt_text, w, h) in enumerate(tasks):
             logger.info(
-                "[%d/%d] Generating %s/%s (%dx%d)",
+                "[%d/%d] Queuing %s/%s (%dx%d)",
                 idx + 1, len(tasks), category, filename, w, h,
             )
-            logger.info("  Prompt: %.100s...", prompt_text)
 
             try:
                 workflow = builder.build_t2i_workflow(
                     prompt=prompt_text, width=w, height=h
                 )
-                result = client.run_workflow(workflow, timeout=COMFY_TIMEOUT_PER_IMAGE)
+                prompt_id = client.submit_workflow(workflow)
+                submitted.append((category, filename, prompt_id))
+            except Exception as e:
+                msg = f"Failed to queue {category}/{filename}: {e}"
+                logger.warning(msg)
+                warnings.append(msg)
+
+        logger.info("Queued %d/%d workflows, waiting for results...", len(submitted), len(tasks))
+
+        # --- Phase 2: Collect results in order ---
+        for idx, (category, filename, prompt_id) in enumerate(submitted):
+            logger.info(
+                "[%d/%d] Waiting for %s/%s (prompt_id=%s)",
+                idx + 1, len(submitted), category, filename, prompt_id,
+            )
+
+            try:
+                result = client.wait_and_fetch(prompt_id, timeout=COMFY_TIMEOUT_PER_IMAGE)
 
                 # Save image to category subfolder
                 cat_dir = os.path.join(tmpdir, category)

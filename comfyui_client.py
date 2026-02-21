@@ -30,24 +30,17 @@ class ComfyUIClient:
         except requests.RequestException:
             return False
 
-    def run_workflow(self, workflow_json, timeout=300):
-        """Submit a workflow to ComfyUI and wait for the output image.
-
-        Args:
-            workflow_json: ComfyUI API-format workflow dict.
-            timeout: Max seconds to wait for completion.
+    def submit_workflow(self, workflow_json):
+        """Submit a workflow to ComfyUI without waiting for completion.
 
         Returns:
-            dict with keys:
-                - image_data (bytes): Raw PNG image data.
-                - filename (str): ComfyUI output filename.
+            str: prompt_id for tracking.
 
         Raises:
-            RuntimeError: If workflow fails or times out.
+            RuntimeError: If submission fails.
         """
         client_id = str(uuid.uuid4())
 
-        # Submit workflow
         resp = requests.post(
             f"{self.base_url}/prompt",
             json={"prompt": workflow_json, "client_id": client_id},
@@ -64,11 +57,23 @@ class ComfyUIClient:
             raise RuntimeError(f"No prompt_id in ComfyUI response: {result}")
 
         logger.info("Submitted workflow, prompt_id=%s", prompt_id)
+        return prompt_id
 
-        # Poll for completion
+    def wait_and_fetch(self, prompt_id, timeout=300):
+        """Wait for a submitted workflow to complete and fetch the image.
+
+        Args:
+            prompt_id: The prompt_id from submit_workflow().
+            timeout: Max seconds to wait.
+
+        Returns:
+            dict with keys: image_data (bytes), filename (str).
+
+        Raises:
+            RuntimeError: If workflow fails or times out.
+        """
         image_info = self._poll_history(prompt_id, timeout)
 
-        # Retrieve image bytes
         image_data = self._fetch_image(
             image_info["filename"],
             image_info.get("subfolder", ""),
@@ -76,6 +81,22 @@ class ComfyUIClient:
         )
 
         return {"image_data": image_data, "filename": image_info["filename"]}
+
+    def run_workflow(self, workflow_json, timeout=300):
+        """Submit a workflow and wait for the output image (convenience method).
+
+        Args:
+            workflow_json: ComfyUI API-format workflow dict.
+            timeout: Max seconds to wait for completion.
+
+        Returns:
+            dict with keys: image_data (bytes), filename (str).
+
+        Raises:
+            RuntimeError: If workflow fails or times out.
+        """
+        prompt_id = self.submit_workflow(workflow_json)
+        return self.wait_and_fetch(prompt_id, timeout)
 
     def _poll_history(self, prompt_id, timeout):
         """Poll /history until the workflow completes.
