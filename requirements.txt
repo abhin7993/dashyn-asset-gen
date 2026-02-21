@@ -4,3 +4,4 @@ anthropic
 huggingface_hub
 Pillow
 streamlit
+openpyxl
