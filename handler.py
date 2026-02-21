@@ -1,9 +1,12 @@
 """
-DashynAssetGen — RunPod Serverless Handler (Streaming)
+DashynAssetGen — RunPod Serverless Handler (Multi-mode)
 
-Receives a vibe description, generates image prompts via Claude API,
-runs them through Qwen-Image T2I via ComfyUI, and streams each image
-back individually as JPEG base64 via RunPod's generator protocol.
+Supports three modes:
+  - generate_prompts: Calls Claude API to produce prompt texts (fast, no GPU work)
+  - render_image: Takes ONE prompt, generates ONE image via ComfyUI (parallelizable)
+  - full (default): Original all-in-one pipeline for backward compatibility
+
+The GUI uses generate_prompts + render_image to fan out across all available workers.
 """
 
 import base64
@@ -75,26 +78,96 @@ except RuntimeError as e:
 
 
 # ---------------------------------------------------------------------------
-# Handler (generator — yields each image as it's generated)
+# Mode: generate_prompts — Claude API call only, returns prompt texts
 # ---------------------------------------------------------------------------
-def handler(job):
-    """RunPod serverless generator handler.
+def _generate_prompts(job_input):
+    vibe_name = job_input.get("vibe_name")
+    vibe_description = job_input.get("vibe_description")
+    num_assets = job_input.get("num_assets", 2)
 
-    Input JSON:
-        {
-            "vibe_name": "string",
-            "vibe_description": "string",
-            "num_assets": integer
+    if not vibe_name:
+        yield {"type": "error", "error": "vibe_name is required"}
+        return
+    if not vibe_description:
+        yield {"type": "error", "error": "vibe_description is required"}
+        return
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        yield {"type": "error", "error": "ANTHROPIC_API_KEY not set"}
+        return
+
+    logger.info("Generating prompts: vibe='%s', num_assets=%d", vibe_name, num_assets)
+
+    try:
+        generator = PromptGenerator(api_key=api_key)
+        prompts = generator.generate_prompts(vibe_name, vibe_description, num_assets)
+    except Exception as e:
+        logger.error("Prompt generation failed: %s", e)
+        yield {"type": "error", "error": f"Prompt generation failed: {e}"}
+        return
+
+    logger.info(
+        "Prompts ready: %d backgrounds, %d female, %d male",
+        len(prompts.get("backgrounds", [])),
+        len(prompts.get("female", [])),
+        len(prompts.get("male", [])),
+    )
+
+    yield {
+        "type": "prompts",
+        "vibe_name": vibe_name,
+        "prompts": prompts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Mode: render_image — ONE prompt → ONE image via ComfyUI
+# ---------------------------------------------------------------------------
+def _render_image(job_input):
+    vibe_name = job_input.get("vibe_name", "unknown")
+    category = job_input.get("category", "unknown")
+    prompt = job_input.get("prompt", "")
+    width = job_input.get("width", 576)
+    height = job_input.get("height", 1024)
+
+    if not prompt:
+        yield {"type": "error", "error": "prompt is required"}
+        return
+
+    logger.info("Rendering image: vibe='%s', category='%s', %dx%d", vibe_name, category, width, height)
+
+    try:
+        client = ComfyUIClient(COMFY_BASE_URL)
+        builder = WorkflowBuilder()
+
+        workflow = builder.build_t2i_workflow(prompt=prompt, width=width, height=height)
+        prompt_id = client.submit_workflow(workflow)
+        result = client.wait_and_fetch(prompt_id, timeout=COMFY_TIMEOUT_PER_IMAGE)
+
+        img = Image.open(io.BytesIO(result["image_data"]))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        logger.info("  Rendered: %s/%s (%.1f KB)", category, vibe_name, len(img_b64) / 1024)
+
+        yield {
+            "type": "image",
+            "category": category,
+            "image_base64": img_b64,
+            "vibe_name": vibe_name,
         }
 
-    Yields (via RunPod streaming):
-        {"type": "progress", "stage": "prompts_ready", ...}
-        {"type": "image", "category": "...", "image_base64": "...", ...}  (per image)
-        {"type": "complete", "total_images": N, ...}
-    """
-    job_input = job.get("input", {})
+    except Exception as e:
+        logger.error("Render failed: %s/%s: %s", category, vibe_name, e)
+        yield {"type": "error", "error": f"Render failed: {e}", "category": category, "vibe_name": vibe_name}
 
-    # --- Extract & validate input ---
+
+# ---------------------------------------------------------------------------
+# Mode: full — original all-in-one pipeline (backward compatibility)
+# ---------------------------------------------------------------------------
+def _full_pipeline(job_input):
     vibe_name = job_input.get("vibe_name")
     vibe_description = job_input.get("vibe_description")
     num_assets = job_input.get("num_assets", 2)
@@ -111,15 +184,15 @@ def handler(job):
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        yield {"type": "error", "error": "ANTHROPIC_API_KEY environment variable not set"}
+        yield {"type": "error", "error": "ANTHROPIC_API_KEY not set"}
         return
 
     logger.info(
-        "Job started: vibe='%s', num_assets=%d (total images=%d)",
+        "Full pipeline: vibe='%s', num_assets=%d (total=%d)",
         vibe_name, num_assets, num_assets * 3,
     )
 
-    # --- Generate prompts via Claude API ---
+    # Generate prompts
     try:
         generator = PromptGenerator(api_key=api_key)
         prompts = generator.generate_prompts(vibe_name, vibe_description, num_assets)
@@ -128,21 +201,14 @@ def handler(job):
         yield {"type": "error", "error": f"Prompt generation failed: {e}"}
         return
 
-    logger.info(
-        "Prompts generated: %d backgrounds, %d female, %d male",
-        len(prompts.get("backgrounds", [])),
-        len(prompts.get("female", [])),
-        len(prompts.get("male", [])),
-    )
-
-    # --- Build task list ---
+    # Build task list
     tasks = []
-    for i, prompt_text in enumerate(prompts.get("backgrounds", [])):
-        tasks.append(("backgrounds", f"bg_{i + 1}.jpg", prompt_text, BG_WIDTH, BG_HEIGHT))
-    for i, prompt_text in enumerate(prompts.get("female", [])):
-        tasks.append(("female", f"female_{i + 1}.jpg", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
-    for i, prompt_text in enumerate(prompts.get("male", [])):
-        tasks.append(("male", f"male_{i + 1}.jpg", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
+    for i, pt in enumerate(prompts.get("backgrounds", [])):
+        tasks.append(("backgrounds", f"bg_{i + 1}.jpg", pt, BG_WIDTH, BG_HEIGHT))
+    for i, pt in enumerate(prompts.get("female", [])):
+        tasks.append(("female", f"female_{i + 1}.jpg", pt, COSTUME_WIDTH, COSTUME_HEIGHT))
+    for i, pt in enumerate(prompts.get("male", [])):
+        tasks.append(("male", f"male_{i + 1}.jpg", pt, COSTUME_WIDTH, COSTUME_HEIGHT))
 
     yield {
         "type": "progress",
@@ -151,17 +217,13 @@ def handler(job):
         "total_images": len(tasks),
     }
 
-    # --- Phase 1: Submit ALL workflows to ComfyUI queue ---
+    # Submit all workflows
     client = ComfyUIClient(COMFY_BASE_URL)
     builder = WorkflowBuilder()
-    submitted = []  # (category, filename, prompt_id)
+    submitted = []
     warnings = []
 
     for idx, (category, filename, prompt_text, w, h) in enumerate(tasks):
-        logger.info(
-            "[%d/%d] Queuing %s/%s (%dx%d)",
-            idx + 1, len(tasks), category, filename, w, h,
-        )
         try:
             workflow = builder.build_t2i_workflow(prompt=prompt_text, width=w, height=h)
             prompt_id = client.submit_workflow(workflow)
@@ -171,19 +233,11 @@ def handler(job):
             logger.warning(msg)
             warnings.append(msg)
 
-    logger.info("Queued %d/%d workflows, collecting results...", len(submitted), len(tasks))
-
-    # --- Phase 2: Collect results and stream each image ---
+    # Collect results and stream each image
     success_count = 0
     for idx, (category, filename, prompt_id) in enumerate(submitted):
-        logger.info(
-            "[%d/%d] Waiting for %s/%s (prompt_id=%s)",
-            idx + 1, len(submitted), category, filename, prompt_id,
-        )
         try:
             result = client.wait_and_fetch(prompt_id, timeout=COMFY_TIMEOUT_PER_IMAGE)
-
-            # Convert PNG from ComfyUI → JPEG for smaller payload
             img = Image.open(io.BytesIO(result["image_data"]))
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=JPEG_QUALITY)
@@ -199,15 +253,11 @@ def handler(job):
                 "vibe_name": vibe_name,
             }
             success_count += 1
-            logger.info("  Streamed: %s/%s (%.1f KB)", category, filename, len(img_b64) / 1024)
-
         except Exception as e:
-            msg = f"Failed to generate {category}/{filename}: {e}"
-            logger.warning(msg)
-            warnings.append(msg)
+            warnings.append(f"Failed {category}/{filename}: {e}")
 
     if success_count == 0:
-        yield {"type": "error", "error": "All image generations failed", "details": warnings}
+        yield {"type": "error", "error": "All generations failed", "details": warnings}
         return
 
     yield {
@@ -217,7 +267,27 @@ def handler(job):
         "warnings": warnings,
     }
 
-    logger.info("Job complete: %d/%d images streamed", success_count, len(tasks))
+
+# ---------------------------------------------------------------------------
+# Main handler — routes by mode
+# ---------------------------------------------------------------------------
+def handler(job):
+    """RunPod serverless generator handler with mode routing.
+
+    Modes:
+        generate_prompts — Claude API → prompt texts (fast, no GPU)
+        render_image     — one prompt → one JPEG image (parallelizable across workers)
+        full (default)   — all-in-one pipeline
+    """
+    job_input = job.get("input", {})
+    mode = job_input.get("mode", "full")
+
+    if mode == "generate_prompts":
+        yield from _generate_prompts(job_input)
+    elif mode == "render_image":
+        yield from _render_image(job_input)
+    else:
+        yield from _full_pipeline(job_input)
 
 
 # ---------------------------------------------------------------------------

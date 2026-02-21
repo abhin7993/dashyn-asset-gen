@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.config.json
 *.safetensors
 .DS_Store
 output/

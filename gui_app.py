@@ -6,6 +6,7 @@ Run with:
 """
 
 import base64
+import json
 import os
 import time
 from pathlib import Path
@@ -18,6 +19,22 @@ POLL_INTERVAL = 3  # seconds between /stream polls
 BASE_TIMEOUT = 300  # 5 min base (cold start + prompt generation)
 PER_IMAGE_TIMEOUT = 60  # ~1 min per image
 CATEGORIES = ["backgrounds", "female", "male"]
+CONFIG_PATH = Path(__file__).parent / ".config.json"
+
+
+def _load_config():
+    """Load saved credentials from local config file."""
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_config(api_key, endpoint_id):
+    """Persist credentials to local config file."""
+    CONFIG_PATH.write_text(json.dumps({"api_key": api_key, "endpoint_id": endpoint_id}))
 
 # ── Page config ──────────────────────────────────────────────────────────────
 
@@ -33,9 +50,13 @@ st.caption("Generate themed image asset packs via RunPod serverless")
 # ── Session state defaults ────────────────────────────────────────────────────
 
 if "api_key" not in st.session_state:
-    st.session_state["api_key"] = os.environ.get("RUNPOD_API_KEY", "")
-if "endpoint_id" not in st.session_state:
-    st.session_state["endpoint_id"] = os.environ.get("RUNPOD_ENDPOINT_ID", "")
+    _cfg = _load_config()
+    st.session_state["api_key"] = (
+        os.environ.get("RUNPOD_API_KEY") or _cfg.get("api_key", "")
+    )
+    st.session_state["endpoint_id"] = (
+        os.environ.get("RUNPOD_ENDPOINT_ID") or _cfg.get("endpoint_id", "")
+    )
 if "num_vibes" not in st.session_state:
     st.session_state["num_vibes"] = 1
 if "gallery_vibes" not in st.session_state:
@@ -70,8 +91,9 @@ with st.sidebar:
             help="Enter once — saved for the session",
         )
         if st.button("Save Credentials", use_container_width=True, type="primary"):
-            st.session_state["api_key"] = new_key
-            st.session_state["endpoint_id"] = new_endpoint
+            st.session_state["api_key"] = new_key.strip()
+            st.session_state["endpoint_id"] = new_endpoint.strip()
+            _save_config(new_key.strip(), new_endpoint.strip())
             st.session_state.pop("edit_creds", None)
             st.rerun()
 
@@ -95,22 +117,15 @@ with st.sidebar:
 # ── API functions ────────────────────────────────────────────────────────────
 
 
-def submit_job(api_key, endpoint_id, vibe_name, vibe_description, num_assets):
-    """POST /run — returns (job_id, error_message)."""
+def submit_run(api_key, endpoint_id, input_payload):
+    """POST /run with arbitrary input — returns (job_id, error_message)."""
     url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "input": {
-            "vibe_name": vibe_name,
-            "vibe_description": vibe_description,
-            "num_assets": num_assets,
-        }
-    }
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        r = requests.post(url, json={"input": input_payload}, headers=headers, timeout=30)
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}: {r.text}"
         return r.json().get("id"), None
@@ -120,23 +135,18 @@ def submit_job(api_key, endpoint_id, vibe_name, vibe_description, num_assets):
         return None, str(e)
 
 
-def poll_stream(api_key, endpoint_id, job_id):
-    """GET /stream/{job_id} — returns (chunks_list, status, error).
-
-    Chunks are consumed on read (not cumulative). Each call returns only
-    new chunks since the last poll.
-    """
-    url = f"https://api.runpod.ai/v2/{endpoint_id}/stream/{job_id}"
+def poll_status(api_key, endpoint_id, job_id):
+    """GET /status/{job_id} — returns (status, result_dict, error_message)."""
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         r = requests.get(url, headers=headers, timeout=30)
         if r.status_code != 200:
-            return [], None, f"HTTP {r.status_code}"
+            return None, None, f"HTTP {r.status_code}"
         data = r.json()
-        chunks = [c["output"] for c in data.get("stream", [])]
-        return chunks, data.get("status"), None
+        return data.get("status"), data, None
     except Exception as e:
-        return [], None, str(e)
+        return None, None, str(e)
 
 
 def _next_filename(directory, prefix, ext):
@@ -286,140 +296,195 @@ if st.button("Generate All", type="primary", use_container_width=True):
 
     total_images = sum(v["num_assets"] * 3 for v in vibes)
     timeout = BASE_TIMEOUT + total_images * PER_IMAGE_TIMEOUT
+    start_time = time.time()
 
+    # ══════════════════════════════════════════════════════════════════════
+    # Phase 1: Generate prompts (one job per vibe — fast, Claude API only)
+    # ══════════════════════════════════════════════════════════════════════
     with st.status(
-        f"Generating {total_images} images across {len(vibes)} vibe(s)...",
+        f"Phase 1 — Generating prompts for {len(vibes)} vibe(s)...",
         expanded=True,
-    ) as status_container:
-        # ── Submit all jobs ──
-        jobs = {}  # vibe_name -> {job_id, received, total, done}
+    ) as phase1_status:
+        prompt_jobs = {}  # vibe_name -> job_id
         for v in vibes:
-            job_id, err = submit_job(
-                api_key, endpoint_id, v["name"], v["description"], v["num_assets"]
-            )
+            job_id, err = submit_run(api_key, endpoint_id, {
+                "mode": "generate_prompts",
+                "vibe_name": v["name"],
+                "vibe_description": v["description"],
+                "num_assets": v["num_assets"],
+            })
             if err:
-                st.error(f"Failed to submit '{v['name']}': {err}")
+                st.error(f"Failed to submit prompts for '{v['name']}': {err}")
                 continue
-            jobs[v["name"]] = {
-                "job_id": job_id,
-                "received": 0,
-                "total": None,
-                "done": False,
-            }
-            st.write(f"Submitted **{v['name']}** — `{job_id}`")
+            prompt_jobs[v["name"]] = job_id
+            st.write(f"Submitted **{v['name']}** prompt job — `{job_id}`")
 
-        if not jobs:
-            status_container.update(label="All submissions failed", state="error")
+        if not prompt_jobs:
+            phase1_status.update(label="All prompt submissions failed", state="error")
             st.stop()
 
-        # ── Progress UI ──
-        progress_bars = {}
-        progress_texts = {}
-        for vibe_name in jobs:
-            progress_texts[vibe_name] = st.empty()
-            progress_bars[vibe_name] = st.progress(0)
+        # Poll for prompt results
+        all_prompts = {}  # vibe_name -> {backgrounds: [...], female: [...], male: [...]}
+        prompt_progress = st.empty()
+        pending_prompts = dict(prompt_jobs)
 
-        latest_img_container = st.empty()
-        st.caption(f"Timeout: {timeout // 60} min | Polling every {POLL_INTERVAL}s")
+        while pending_prompts:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                st.error("Timeout waiting for prompts!")
+                phase1_status.update(label="Timed out", state="error")
+                st.stop()
 
-        start_time = time.time()
-        generated_vibes = list(jobs.keys())
+            time.sleep(POLL_INTERVAL)
 
-        # ── Streaming poll loop ──
-        while True:
+            for vibe_name in list(pending_prompts.keys()):
+                status_val, result, err = poll_status(
+                    api_key, endpoint_id, pending_prompts[vibe_name]
+                )
+                if err:
+                    continue
+
+                if status_val == "COMPLETED":
+                    output = result.get("output", [])
+                    for chunk in output:
+                        if chunk.get("type") == "prompts":
+                            all_prompts[vibe_name] = chunk["prompts"]
+                        elif chunk.get("type") == "error":
+                            st.error(f"{vibe_name}: {chunk['error']}")
+                    del pending_prompts[vibe_name]
+
+                elif status_val == "FAILED":
+                    st.error(f"{vibe_name}: Prompt generation failed")
+                    del pending_prompts[vibe_name]
+
+            prompt_progress.markdown(
+                f"Prompts ready: **{len(all_prompts)}/{len(prompt_jobs)}** vibes"
+            )
+
+        if not all_prompts:
+            phase1_status.update(label="All prompt jobs failed", state="error")
+            st.stop()
+
+        phase1_status.update(
+            label=f"Prompts ready — {len(all_prompts)} vibe(s)",
+            state="complete",
+        )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Phase 2: Render images (one job per image — fans out across workers)
+    # ══════════════════════════════════════════════════════════════════════
+
+    # Build task list from collected prompts
+    render_tasks = []  # [(vibe_name, category, prompt_text)]
+    for vibe_name, prompts in all_prompts.items():
+        for pt in prompts.get("backgrounds", []):
+            render_tasks.append((vibe_name, "backgrounds", pt))
+        for pt in prompts.get("female", []):
+            render_tasks.append((vibe_name, "female", pt))
+        for pt in prompts.get("male", []):
+            render_tasks.append((vibe_name, "male", pt))
+
+    total_render = len(render_tasks)
+
+    with st.status(
+        f"Phase 2 — Rendering {total_render} images across workers...",
+        expanded=True,
+    ) as phase2_status:
+        # Submit ALL render jobs at once — RunPod distributes across workers
+        render_jobs = {}  # job_id -> {vibe_name, category}
+        for vibe_name, category, prompt_text in render_tasks:
+            job_id, err = submit_run(api_key, endpoint_id, {
+                "mode": "render_image",
+                "vibe_name": vibe_name,
+                "category": category,
+                "prompt": prompt_text,
+                "width": 576,
+                "height": 1024,
+            })
+            if err:
+                st.warning(f"Failed to submit {vibe_name}/{category}: {err}")
+                continue
+            render_jobs[job_id] = {"vibe_name": vibe_name, "category": category}
+
+        st.write(
+            f"Dispatched **{len(render_jobs)}** render jobs "
+            f"(RunPod will use all available workers)"
+        )
+
+        if not render_jobs:
+            phase2_status.update(label="All render submissions failed", state="error")
+            st.stop()
+
+        # Progress UI
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        latest_img = st.empty()
+
+        completed = 0
+        pending_renders = dict(render_jobs)
+
+        while pending_renders:
             elapsed = time.time() - start_time
             if elapsed > timeout:
                 st.error(f"Timeout after {timeout // 60} minutes!")
-                status_container.update(label="Timed out", state="error")
+                phase2_status.update(label="Timed out", state="error")
                 break
 
             time.sleep(POLL_INTERVAL)
 
-            all_done = True
-            for vibe_name, job_info in jobs.items():
-                if job_info["done"]:
-                    continue
-                all_done = False
-
-                chunks, stream_status, err = poll_stream(
-                    api_key, endpoint_id, job_info["job_id"]
+            for job_id in list(pending_renders.keys()):
+                status_val, result, err = poll_status(
+                    api_key, endpoint_id, job_id
                 )
-
                 if err:
-                    progress_texts[vibe_name].markdown(
-                        f"**{vibe_name}**: Poll error (retrying) — {err}"
-                    )
                     continue
 
-                # Process new chunks
-                for chunk in chunks:
-                    chunk_type = chunk.get("type")
+                if status_val in ("COMPLETED", "FAILED"):
+                    info = pending_renders.pop(job_id)
+                    completed += 1
 
-                    if chunk_type == "progress":
-                        job_info["total"] = chunk.get("total_images")
-                        progress_texts[vibe_name].markdown(
-                            f"**{vibe_name}**: Prompts ready — {job_info['total']} images queued"
-                        )
+                    if status_val == "COMPLETED":
+                        output = result.get("output", [])
+                        for chunk in output:
+                            if chunk.get("type") == "image":
+                                img_bytes = base64.b64decode(chunk["image_base64"])
+                                _, saved_name = save_streamed_image(
+                                    img_bytes,
+                                    info["category"],
+                                    info["vibe_name"],
+                                    output_dir,
+                                )
+                                latest_img.image(
+                                    img_bytes,
+                                    caption=f"{info['vibe_name']}/{info['category']}/{saved_name}",
+                                    width=200,
+                                )
+                            elif chunk.get("type") == "error":
+                                st.warning(
+                                    f"{info['vibe_name']}/{info['category']}: "
+                                    f"{chunk.get('error')}"
+                                )
+                    else:
+                        st.warning(f"{info['vibe_name']}/{info['category']}: Job failed")
 
-                    elif chunk_type == "image":
-                        img_bytes = base64.b64decode(chunk["image_base64"])
-                        category = chunk["category"]
-
-                        _, saved_name = save_streamed_image(
-                            img_bytes, category, vibe_name, output_dir
-                        )
-
-                        job_info["received"] += 1
-                        total = job_info.get("total") or chunk.get("total", 1)
-                        pct = min(job_info["received"] / total, 1.0)
-                        progress_bars[vibe_name].progress(pct)
-                        progress_texts[vibe_name].markdown(
-                            f"**{vibe_name}**: {job_info['received']}/{total} — "
-                            f"saved `{category}/{saved_name}`"
-                        )
-
-                        # Show latest image thumbnail
-                        latest_img_container.image(
-                            img_bytes,
-                            caption=f"{vibe_name}/{category}/{saved_name}",
-                            width=200,
-                        )
-
-                    elif chunk_type == "complete":
-                        job_info["done"] = True
-                        total = chunk.get("total_images", job_info["received"])
-                        progress_bars[vibe_name].progress(1.0)
-                        progress_texts[vibe_name].markdown(
-                            f"**{vibe_name}**: Complete — {total} images"
-                        )
-                        warnings = chunk.get("warnings", [])
-                        for w in warnings:
-                            st.warning(f"{vibe_name}: {w}")
-
-                    elif chunk_type == "error":
-                        job_info["done"] = True
-                        st.error(f"{vibe_name}: {chunk.get('error', 'Unknown error')}")
-                        progress_bars[vibe_name].progress(1.0)
-
-                # Fallback: check stream status if no complete chunk received
-                if stream_status in ("COMPLETED", "FAILED") and not job_info["done"]:
-                    job_info["done"] = True
-                    if stream_status == "FAILED":
-                        st.error(f"{vibe_name}: Job failed")
-                    progress_bars[vibe_name].progress(1.0)
-
-            if all_done:
-                break
+                    # Update progress
+                    pct = completed / total_render
+                    progress_bar.progress(min(pct, 1.0))
+                    elapsed_str = f"{int(time.time() - start_time)}s"
+                    progress_text.markdown(
+                        f"**{int(pct * 100)}%** — "
+                        f"{completed}/{total_render} images — "
+                        f"{elapsed_str}"
+                    )
 
         elapsed_final = int(time.time() - start_time)
-        total_received = sum(j["received"] for j in jobs.values())
-        status_container.update(
-            label=f"Done — {total_received} images in {elapsed_final}s",
+        phase2_status.update(
+            label=f"Done — {completed}/{total_render} images in {elapsed_final}s",
             state="complete",
         )
 
     # Store for gallery
-    st.session_state["gallery_vibes"] = generated_vibes
+    st.session_state["gallery_vibes"] = list(all_prompts.keys())
     st.session_state["gallery_output_dir"] = output_dir
 
 # ── Results gallery ──────────────────────────────────────────────────────────
