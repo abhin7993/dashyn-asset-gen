@@ -1,0 +1,5 @@
+runpod
+requests
+anthropic
+huggingface_hub
+Pillow
