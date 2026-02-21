@@ -1,19 +1,19 @@
 """
-DashynAssetGen — RunPod Serverless Handler
+DashynAssetGen — RunPod Serverless Handler (Streaming)
 
 Receives a vibe description, generates image prompts via Claude API,
-runs them through Qwen-Image T2I via ComfyUI, and returns a base64-encoded
-zip of organized assets.
+runs them through Qwen-Image T2I via ComfyUI, and streams each image
+back individually as JPEG base64 via RunPod's generator protocol.
 """
 
 import base64
+import io
 import logging
 import os
-import tempfile
 import time
-import zipfile
 
 import runpod
+from PIL import Image
 
 from comfyui_client import ComfyUIClient
 from model_manager import ensure_models_available
@@ -38,6 +38,8 @@ COMFY_TIMEOUT_PER_IMAGE = 300  # seconds
 # Resolutions (all 9:16 ratio)
 BG_WIDTH, BG_HEIGHT = 576, 1024
 COSTUME_WIDTH, COSTUME_HEIGHT = 576, 1024
+
+JPEG_QUALITY = 95  # high quality, keeps payload under RunPod's 1MB/chunk limit
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +66,6 @@ try:
         logger.info("Model: %s", action)
 except RuntimeError as e:
     logger.error("Model setup failed: %s", e)
-    # We'll let the handler return this error per-job rather than crashing
 
 # Step 2: Wait for ComfyUI server
 try:
@@ -74,10 +75,10 @@ except RuntimeError as e:
 
 
 # ---------------------------------------------------------------------------
-# Handler
+# Handler (generator — yields each image as it's generated)
 # ---------------------------------------------------------------------------
 def handler(job):
-    """Main RunPod serverless handler.
+    """RunPod serverless generator handler.
 
     Input JSON:
         {
@@ -86,12 +87,10 @@ def handler(job):
             "num_assets": integer
         }
 
-    Returns:
-        {
-            "zip_base64": "...",
-            "vibe_name": "...",
-            "total_images": N
-        }
+    Yields (via RunPod streaming):
+        {"type": "progress", "stage": "prompts_ready", ...}
+        {"type": "image", "category": "...", "image_base64": "...", ...}  (per image)
+        {"type": "complete", "total_images": N, ...}
     """
     job_input = job.get("input", {})
 
@@ -101,24 +100,23 @@ def handler(job):
     num_assets = job_input.get("num_assets", 2)
 
     if not vibe_name:
-        return {"error": "vibe_name is required", "status": "failed"}
+        yield {"type": "error", "error": "vibe_name is required"}
+        return
     if not vibe_description:
-        return {"error": "vibe_description is required", "status": "failed"}
+        yield {"type": "error", "error": "vibe_description is required"}
+        return
     if not isinstance(num_assets, int) or num_assets < 1:
-        return {"error": "num_assets must be a positive integer", "status": "failed"}
+        yield {"type": "error", "error": "num_assets must be a positive integer"}
+        return
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {
-            "error": "ANTHROPIC_API_KEY environment variable not set",
-            "status": "failed",
-        }
+        yield {"type": "error", "error": "ANTHROPIC_API_KEY environment variable not set"}
+        return
 
     logger.info(
         "Job started: vibe='%s', num_assets=%d (total images=%d)",
-        vibe_name,
-        num_assets,
-        num_assets * 3,
+        vibe_name, num_assets, num_assets * 3,
     )
 
     # --- Generate prompts via Claude API ---
@@ -127,7 +125,8 @@ def handler(job):
         prompts = generator.generate_prompts(vibe_name, vibe_description, num_assets)
     except Exception as e:
         logger.error("Prompt generation failed: %s", e)
-        return {"error": f"Prompt generation failed: {e}", "status": "failed"}
+        yield {"type": "error", "error": f"Prompt generation failed: {e}"}
+        return
 
     logger.info(
         "Prompts generated: %d backgrounds, %d female, %d male",
@@ -136,111 +135,92 @@ def handler(job):
         len(prompts.get("male", [])),
     )
 
-    # --- Generate images via ComfyUI ---
-    client = ComfyUIClient(COMFY_BASE_URL)
-    builder = WorkflowBuilder()
-
-    # Build task list: (category_folder, filename, prompt, width, height)
+    # --- Build task list ---
     tasks = []
     for i, prompt_text in enumerate(prompts.get("backgrounds", [])):
-        tasks.append(("backgrounds", f"bg_{i + 1}.png", prompt_text, BG_WIDTH, BG_HEIGHT))
+        tasks.append(("backgrounds", f"bg_{i + 1}.jpg", prompt_text, BG_WIDTH, BG_HEIGHT))
     for i, prompt_text in enumerate(prompts.get("female", [])):
-        tasks.append(("female", f"female_{i + 1}.png", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
+        tasks.append(("female", f"female_{i + 1}.jpg", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
     for i, prompt_text in enumerate(prompts.get("male", [])):
-        tasks.append(("male", f"male_{i + 1}.png", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
+        tasks.append(("male", f"male_{i + 1}.jpg", prompt_text, COSTUME_WIDTH, COSTUME_HEIGHT))
 
-    with tempfile.TemporaryDirectory(dir="/runpod-volume") as tmpdir:
-        generated = []  # (category, filename, filepath)
-        warnings = []
-
-        # --- Phase 1: Submit ALL workflows to ComfyUI queue at once ---
-        submitted = []  # (category, filename, prompt_id)
-        for idx, (category, filename, prompt_text, w, h) in enumerate(tasks):
-            logger.info(
-                "[%d/%d] Queuing %s/%s (%dx%d)",
-                idx + 1, len(tasks), category, filename, w, h,
-            )
-
-            try:
-                workflow = builder.build_t2i_workflow(
-                    prompt=prompt_text, width=w, height=h
-                )
-                prompt_id = client.submit_workflow(workflow)
-                submitted.append((category, filename, prompt_id))
-            except Exception as e:
-                msg = f"Failed to queue {category}/{filename}: {e}"
-                logger.warning(msg)
-                warnings.append(msg)
-
-        logger.info("Queued %d/%d workflows, waiting for results...", len(submitted), len(tasks))
-
-        # --- Phase 2: Collect results in order ---
-        for idx, (category, filename, prompt_id) in enumerate(submitted):
-            logger.info(
-                "[%d/%d] Waiting for %s/%s (prompt_id=%s)",
-                idx + 1, len(submitted), category, filename, prompt_id,
-            )
-
-            try:
-                result = client.wait_and_fetch(prompt_id, timeout=COMFY_TIMEOUT_PER_IMAGE)
-
-                # Save image to category subfolder
-                cat_dir = os.path.join(tmpdir, category)
-                os.makedirs(cat_dir, exist_ok=True)
-                filepath = os.path.join(cat_dir, filename)
-                with open(filepath, "wb") as f:
-                    f.write(result["image_data"])
-
-                generated.append((category, filename, filepath))
-                logger.info("  Saved: %s/%s", category, filename)
-
-            except Exception as e:
-                msg = f"Failed to generate {category}/{filename}: {e}"
-                logger.warning(msg)
-                warnings.append(msg)
-
-        if not generated:
-            return {
-                "error": "All image generations failed",
-                "details": warnings,
-                "status": "failed",
-            }
-
-        # --- Create zip ---
-        zip_path = os.path.join(tmpdir, f"{vibe_name}.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for category, filename, filepath in generated:
-                arcname = f"{category}/{filename}"
-                zf.write(filepath, arcname)
-
-        logger.info(
-            "Zip created: %s (%.1f MB, %d images)",
-            zip_path,
-            os.path.getsize(zip_path) / (1024 * 1024),
-            len(generated),
-        )
-
-        # --- Base64 encode ---
-        with open(zip_path, "rb") as f:
-            zip_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-    # --- Return response ---
-    response = {
-        "zip_base64": zip_base64,
+    yield {
+        "type": "progress",
+        "stage": "prompts_ready",
         "vibe_name": vibe_name,
-        "total_images": len(generated),
+        "total_images": len(tasks),
     }
 
-    if warnings:
-        response["warnings"] = warnings
+    # --- Phase 1: Submit ALL workflows to ComfyUI queue ---
+    client = ComfyUIClient(COMFY_BASE_URL)
+    builder = WorkflowBuilder()
+    submitted = []  # (category, filename, prompt_id)
+    warnings = []
 
-    logger.info(
-        "Job complete: %d/%d images generated", len(generated), len(tasks)
-    )
-    return response
+    for idx, (category, filename, prompt_text, w, h) in enumerate(tasks):
+        logger.info(
+            "[%d/%d] Queuing %s/%s (%dx%d)",
+            idx + 1, len(tasks), category, filename, w, h,
+        )
+        try:
+            workflow = builder.build_t2i_workflow(prompt=prompt_text, width=w, height=h)
+            prompt_id = client.submit_workflow(workflow)
+            submitted.append((category, filename, prompt_id))
+        except Exception as e:
+            msg = f"Failed to queue {category}/{filename}: {e}"
+            logger.warning(msg)
+            warnings.append(msg)
+
+    logger.info("Queued %d/%d workflows, collecting results...", len(submitted), len(tasks))
+
+    # --- Phase 2: Collect results and stream each image ---
+    success_count = 0
+    for idx, (category, filename, prompt_id) in enumerate(submitted):
+        logger.info(
+            "[%d/%d] Waiting for %s/%s (prompt_id=%s)",
+            idx + 1, len(submitted), category, filename, prompt_id,
+        )
+        try:
+            result = client.wait_and_fetch(prompt_id, timeout=COMFY_TIMEOUT_PER_IMAGE)
+
+            # Convert PNG from ComfyUI → JPEG for smaller payload
+            img = Image.open(io.BytesIO(result["image_data"]))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+            img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+            yield {
+                "type": "image",
+                "category": category,
+                "filename": filename,
+                "image_base64": img_b64,
+                "index": idx + 1,
+                "total": len(submitted),
+                "vibe_name": vibe_name,
+            }
+            success_count += 1
+            logger.info("  Streamed: %s/%s (%.1f KB)", category, filename, len(img_b64) / 1024)
+
+        except Exception as e:
+            msg = f"Failed to generate {category}/{filename}: {e}"
+            logger.warning(msg)
+            warnings.append(msg)
+
+    if success_count == 0:
+        yield {"type": "error", "error": "All image generations failed", "details": warnings}
+        return
+
+    yield {
+        "type": "complete",
+        "vibe_name": vibe_name,
+        "total_images": success_count,
+        "warnings": warnings,
+    }
+
+    logger.info("Job complete: %d/%d images streamed", success_count, len(tasks))
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-runpod.serverless.start({"handler": handler})
+runpod.serverless.start({"handler": handler, "return_aggregate_stream": True})
