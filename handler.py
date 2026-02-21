@@ -35,9 +35,9 @@ logger = logging.getLogger("handler")
 COMFY_BASE_URL = "http://127.0.0.1:8188"
 COMFY_TIMEOUT_PER_IMAGE = 300  # seconds
 
-# Resolutions
-BG_WIDTH, BG_HEIGHT = 1024, 1024
-COSTUME_WIDTH, COSTUME_HEIGHT = 768, 1024
+# Resolutions (all 9:16 ratio)
+BG_WIDTH, BG_HEIGHT = 576, 1024
+COSTUME_WIDTH, COSTUME_HEIGHT = 576, 1024
 
 
 # ---------------------------------------------------------------------------

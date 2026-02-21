@@ -33,8 +33,8 @@ class WorkflowBuilder:
 
         Args:
             prompt: Text prompt for image generation.
-            width: Output image width (1024 for backgrounds, 768 for costumes).
-            height: Output image height (1024 for backgrounds, 1024 for costumes).
+            width: Output image width (576 for 9:16 ratio).
+            height: Output image height (1024 for 9:16 ratio).
             seed: Random seed. If None, generates a random one.
 
         Returns:

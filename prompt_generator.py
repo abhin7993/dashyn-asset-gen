@@ -44,18 +44,20 @@ Description: {vibe_description}
 
 Generate image prompts for this vibe across three categories:
 
-1. "backgrounds" — {num_assets} unique background/environment scenes (1024x1024 square format).
+1. "backgrounds" — {num_assets} unique background/environment scenes (9:16 vertical portrait format).
    These should be varied environments matching the vibe aesthetic. No people in the scene.
-   Focus on architecture, landscapes, interiors, or atmospheric settings.
+   Focus on architecture, landscapes, interiors, or atmospheric settings. Composed for vertical framing.
 
-2. "female" — {num_assets} female outfit/costume prompts (768x1024 portrait format).
-   Full outfit displayed on a plain/neutral background. Fashion photography style.
-   Show the complete clothing ensemble clearly. NO face or person — clothing only,
-   displayed as if on an invisible mannequin or laid flat. Include accessories.
+2. "female" — {num_assets} female outfit/costume prompts (9:16 vertical portrait format).
+   FULL-LENGTH outfit from head to toe displayed on a plain/neutral background. Fashion photography style.
+   MUST show the COMPLETE clothing ensemble from top to bottom including footwear/shoes/sandals.
+   NO face or person — clothing only, displayed as if on an invisible mannequin or laid flat.
+   Include all accessories and footwear. The entire outfit must be visible, never cropped at knee or waist.
 
-3. "male" — {num_assets} male outfit/costume prompts (768x1024 portrait format).
-   Same style as female — full outfit on neutral background, clothing only, no face.
-   Include accessories and footwear.
+3. "male" — {num_assets} male outfit/costume prompts (9:16 vertical portrait format).
+   Same style as female — FULL-LENGTH outfit from head to toe on neutral background, clothing only, no face.
+   MUST show complete outfit including footwear/shoes. Never crop at knee or waist.
+   Include all accessories and footwear.
 
 Each prompt should be 2-4 sentences of vivid visual description."""
 
