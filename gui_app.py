@@ -102,6 +102,14 @@ with st.sidebar:
 
     st.divider()
     st.header("Output Settings")
+    num_assets = st.number_input(
+        "Images per category",
+        min_value=1,
+        max_value=10,
+        value=2,
+        help="Number of images to generate per category (backgrounds, female, male) for every vibe",
+        key="global_num_assets",
+    )
     output_dir = st.text_input(
         "Output Directory",
         value="./output",
@@ -174,7 +182,7 @@ def save_streamed_image(img_bytes, category, vibe_name, output_dir):
 uploaded_file = st.file_uploader(
     "Upload Vibes from Excel",
     type=["xlsx", "xls"],
-    help="3 columns, no headers: vibe_name, vibe_description, num_assets",
+    help="2 columns, no headers: vibe_name, vibe_description",
 )
 
 if uploaded_file is not None:
@@ -191,20 +199,18 @@ if uploaded_file is not None:
                         {
                             "name": str(row[0]).strip(),
                             "description": str(row[1] or "").strip(),
-                            "num_assets": int(row[2]) if row[2] else 2,
                         }
                     )
             if vibes:
                 # Clear old vibe keys
                 for i in range(st.session_state["num_vibes"]):
-                    for k in [f"vibe_name_{i}", f"vibe_desc_{i}", f"vibe_num_{i}"]:
+                    for k in [f"vibe_name_{i}", f"vibe_desc_{i}"]:
                         st.session_state.pop(k, None)
                 # Set new vibes
                 st.session_state["num_vibes"] = len(vibes)
                 for i, v in enumerate(vibes):
                     st.session_state[f"vibe_name_{i}"] = v["name"]
                     st.session_state[f"vibe_desc_{i}"] = v["description"]
-                    st.session_state[f"vibe_num_{i}"] = v["num_assets"]
                 st.success(f"Imported {len(vibes)} vibe(s) from Excel")
                 st.rerun()
             else:
@@ -219,7 +225,7 @@ st.subheader("Vibes")
 for i in range(st.session_state["num_vibes"]):
     with st.container(border=True):
         st.markdown(f"**Vibe {i + 1}**")
-        c1, c2, c3 = st.columns([2, 4, 1])
+        c1, c2 = st.columns([2, 5])
         with c1:
             st.text_input(
                 "Name",
@@ -235,15 +241,6 @@ for i in range(st.session_state["num_vibes"]):
                 height=68,
                 label_visibility="collapsed" if i > 0 else "visible",
             )
-        with c3:
-            st.number_input(
-                "Assets",
-                min_value=1,
-                max_value=10,
-                value=2,
-                key=f"vibe_num_{i}",
-                label_visibility="collapsed" if i > 0 else "visible",
-            )
 
 c_add, c_remove, c_summary = st.columns([1, 1, 2])
 with c_add:
@@ -256,27 +253,24 @@ with c_remove:
         and st.session_state["num_vibes"] > 1
     ):
         n = st.session_state["num_vibes"] - 1
-        for k in [f"vibe_name_{n}", f"vibe_desc_{n}", f"vibe_num_{n}"]:
+        for k in [f"vibe_name_{n}", f"vibe_desc_{n}"]:
             st.session_state.pop(k, None)
         st.session_state["num_vibes"] = n
         st.rerun()
 with c_summary:
-    total_images = sum(
-        st.session_state.get(f"vibe_num_{i}", 2) * 3
-        for i in range(st.session_state["num_vibes"])
-    )
+    total_images = st.session_state["num_vibes"] * st.session_state.get("global_num_assets", 2) * 3
     st.metric("Total Images", total_images)
 
 # ── Generate ─────────────────────────────────────────────────────────────────
 
 if st.button("Generate All", type="primary", use_container_width=True):
-    # Collect vibes from widget state
+    # Collect vibes from widget state — single global num_assets for all vibes
+    global_num = st.session_state.get("global_num_assets", 2)
     vibes = []
     for i in range(st.session_state["num_vibes"]):
         name = st.session_state.get(f"vibe_name_{i}", "").strip().replace(" ", "_")
         desc = st.session_state.get(f"vibe_desc_{i}", "").strip()
-        num = st.session_state.get(f"vibe_num_{i}", 2)
-        vibes.append({"name": name, "description": desc, "num_assets": num})
+        vibes.append({"name": name, "description": desc, "num_assets": global_num})
 
     # Validate
     errors = []

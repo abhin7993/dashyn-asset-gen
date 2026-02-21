@@ -10,13 +10,21 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a prompt engineer for Qwen-Image, an AI text-to-image generation model.
-Generate vivid, detailed image generation prompts optimized for high-quality output.
+Generate vivid, detailed image generation prompts optimized for photorealistic output.
 
 Guidelines:
 - Each prompt must be self-contained and richly descriptive.
-- Focus on: visual style, lighting, mood, color palette, composition, specific details.
-- Art style: semi-realistic digital art, high detail, professional quality.
+- Focus on: realistic fabric textures, natural lighting, true-to-life colors, sharp details, and professional composition.
+- Art style: photorealistic, professional fashion photography, ultra-high detail, 8K quality, studio lighting.
+- Every prompt MUST begin with "photorealistic, professional fashion photography, " to anchor the style.
 - Do NOT include text, watermarks, or UI elements in prompt descriptions.
+- Do NOT include any artistic or illustrated styles — output must look like a real photograph.
+
+CRITICAL gender rules for outfit categories:
+- "female" outfits MUST only contain women's clothing: sarees, lehengas, gowns, dresses, salwar kameez, skirts, blouses, feminine tops, heels, sandals, women's jewelry, dupattas, etc.
+- "male" outfits MUST only contain men's clothing: sherwanis, kurta-pajama, suits, blazers, trousers, shirts, dhotis, turbans, men's shoes/juttis, men's watches, etc.
+- NEVER mix genders — a male prompt must NEVER include sarees, lehengas, gowns, dupattas, heels, or any women's garments.
+- NEVER mix genders — a female prompt must NEVER include sherwanis, suits with trousers, dhotis, turbans, or any men's garments.
 """
 
 
@@ -47,19 +55,26 @@ Generate image prompts for this vibe across three categories:
 1. "backgrounds" — {num_assets} unique background/environment scenes (9:16 vertical portrait format).
    These should be varied environments matching the vibe aesthetic. No people in the scene.
    Focus on architecture, landscapes, interiors, or atmospheric settings. Composed for vertical framing.
+   Style: photorealistic photograph, natural lighting, sharp focus, ultra-detailed.
 
-2. "female" — {num_assets} female outfit/costume prompts (9:16 vertical portrait format).
-   FULL-LENGTH outfit from head to toe displayed on a plain/neutral background. Fashion photography style.
-   MUST show the COMPLETE clothing ensemble from top to bottom including footwear/shoes/sandals.
-   NO face or person — clothing only, displayed as if on an invisible mannequin or laid flat.
+2. "female" — {num_assets} WOMEN'S outfit/costume prompts (9:16 vertical portrait format).
+   Photorealistic product photography of a COMPLETE WOMEN'S clothing ensemble on a plain/neutral background.
+   FULL-LENGTH from head accessory to footwear — MUST show the entire outfit top to bottom including shoes/sandals/heels.
+   NO face or person — clothing only, displayed as if on an invisible mannequin or flat lay.
+   ONLY women's garments: sarees, lehengas, gowns, dresses, salwar kameez, skirts, feminine tops, women's jewelry, dupattas, heels, etc.
+   NEVER include any men's clothing items like sherwanis, suits with trousers, dhotis, or turbans.
    Include all accessories and footwear. The entire outfit must be visible, never cropped at knee or waist.
 
-3. "male" — {num_assets} male outfit/costume prompts (9:16 vertical portrait format).
-   Same style as female — FULL-LENGTH outfit from head to toe on neutral background, clothing only, no face.
-   MUST show complete outfit including footwear/shoes. Never crop at knee or waist.
-   Include all accessories and footwear.
+3. "male" — {num_assets} MEN'S outfit/costume prompts (9:16 vertical portrait format).
+   Photorealistic product photography of a COMPLETE MEN'S clothing ensemble on a plain/neutral background.
+   FULL-LENGTH from headwear to footwear — MUST show the entire outfit top to bottom including shoes/juttis.
+   NO face or person — clothing only, displayed as if on an invisible mannequin or flat lay.
+   ONLY men's garments: sherwanis, kurta-pajama, suits, blazers, trousers, shirts, dhotis, turbans, men's shoes/juttis, etc.
+   NEVER include any women's clothing items like sarees, lehengas, gowns, dupattas, heels, or women's jewelry.
+   Include all accessories and footwear. The entire outfit must be visible, never cropped at knee or waist.
 
-Each prompt should be 2-4 sentences of vivid visual description."""
+IMPORTANT: Every prompt MUST start with "photorealistic, professional fashion photography, " to ensure realistic output.
+Each prompt should be 3-5 sentences of vivid, photorealistic visual description with specific fabric textures, colors, and material details."""
 
         tool_schema = {
             "name": "generate_prompts",
@@ -70,17 +85,17 @@ Each prompt should be 2-4 sentences of vivid visual description."""
                     "backgrounds": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Background/environment scene prompts",
+                        "description": "Photorealistic background/environment scene prompts",
                     },
                     "female": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Female outfit/costume prompts",
+                        "description": "Women's outfit prompts ONLY — must contain exclusively feminine garments, never men's clothing",
                     },
                     "male": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Male outfit/costume prompts",
+                        "description": "Men's outfit prompts ONLY — must contain exclusively masculine garments, never women's clothing",
                     },
                 },
                 "required": ["backgrounds", "female", "male"],

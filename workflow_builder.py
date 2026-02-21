@@ -13,7 +13,7 @@ class WorkflowBuilder:
         unet_model="qwen_image_fp8_e4m3fn.safetensors",
         clip_model="qwen_2.5_vl_7b_fp8_scaled.safetensors",
         vae_model="qwen_image_vae.safetensors",
-        steps=15,
+        steps=25,
         cfg=1.0,
         sampler_name="euler",
         scheduler="simple",
