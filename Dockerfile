@@ -3,8 +3,8 @@
 # Based on official RunPod worker-comfyui base image
 # Models loaded from Network Volume at runtime
 # =============================================================================
-# Pin to 5.4.1 with CUDA 12.4.1 for broad GPU driver compatibility
-FROM runpod/worker-comfyui:5.4.1-base-cuda12.4.1
+# Pin to 5.4.1-base (older ComfyUI + default CUDA for broad driver compatibility)
+FROM runpod/worker-comfyui:5.4.1-base
 
 # Install custom nodes for Qwen-Image T2I support
 RUN comfy-node-install ComfyUI_RH_Qwen-Image || true
