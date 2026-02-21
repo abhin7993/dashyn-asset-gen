@@ -21,7 +21,6 @@ python /comfyui/main.py \
     --disable-auto-launch \
     --disable-metadata \
     --log-stdout \
-    --highvram \
     --extra-model-paths-config /comfyui/extra_model_paths.yaml &
 
 echo "Starting RunPod handler..."
