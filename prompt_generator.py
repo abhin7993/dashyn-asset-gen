@@ -3,8 +3,9 @@ Claude API integration for generating image prompts from a vibe description.
 """
 
 import logging
+import time
 
-from anthropic import Anthropic
+from anthropic import Anthropic, RateLimitError, APIStatusError
 
 logger = logging.getLogger(__name__)
 
@@ -106,27 +107,57 @@ Each prompt should be 3-5 sentences of vivid, photorealistic visual description 
             "Generating prompts for vibe='%s', num_assets=%d", vibe_name, num_assets
         )
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-            tools=[tool_schema],
-            tool_choice={"type": "tool", "name": "generate_prompts"},
-        )
+        max_retries = 5
+        last_error = None
 
-        # Extract structured output from tool call
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "generate_prompts":
-                prompts = block.input
-                logger.info(
-                    "Generated prompts: %d backgrounds, %d female, %d male",
-                    len(prompts.get("backgrounds", [])),
-                    len(prompts.get("female", [])),
-                    len(prompts.get("male", [])),
+        for attempt in range(max_retries):
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    tools=[tool_schema],
+                    tool_choice={"type": "tool", "name": "generate_prompts"},
                 )
-                return prompts
+
+                # Extract structured output from tool call
+                for block in response.content:
+                    if block.type == "tool_use" and block.name == "generate_prompts":
+                        prompts = block.input
+                        logger.info(
+                            "Generated prompts: %d backgrounds, %d female, %d male",
+                            len(prompts.get("backgrounds", [])),
+                            len(prompts.get("female", [])),
+                            len(prompts.get("male", [])),
+                        )
+                        return prompts
+
+                raise RuntimeError(
+                    "Claude API did not return expected tool_use response"
+                )
+
+            except RateLimitError as e:
+                last_error = e
+                wait = 2 ** attempt  # 1, 2, 4, 8, 16 seconds
+                logger.warning(
+                    "Rate limited on attempt %d/%d for vibe='%s', retrying in %ds",
+                    attempt + 1, max_retries, vibe_name, wait,
+                )
+                time.sleep(wait)
+
+            except APIStatusError as e:
+                if e.status_code == 529:  # overloaded
+                    last_error = e
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "API overloaded on attempt %d/%d for vibe='%s', retrying in %ds",
+                        attempt + 1, max_retries, vibe_name, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
         raise RuntimeError(
-            "Claude API did not return expected tool_use response"
+            f"Claude API failed after {max_retries} retries: {last_error}"
         )
