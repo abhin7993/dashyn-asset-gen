@@ -13,11 +13,12 @@ class WorkflowBuilder:
         unet_model="qwen_image_fp8_e4m3fn.safetensors",
         clip_model="qwen_2.5_vl_7b_fp8_scaled.safetensors",
         vae_model="qwen_image_vae.safetensors",
-        steps=25,
-        cfg=1.0,
+        steps=30,
+        cfg=3.5,
         sampler_name="euler",
         scheduler="simple",
         auraflow_shift=3.1,
+        negative_prompt="illustration, cartoon, painting, sketch, anime, digital art, 3d render, drawing, watercolor, oil painting, low quality, blurry, deformed, ugly, disfigured",
     ):
         self.unet_model = unet_model
         self.clip_model = clip_model
@@ -27,6 +28,7 @@ class WorkflowBuilder:
         self.sampler_name = sampler_name
         self.scheduler = scheduler
         self.auraflow_shift = auraflow_shift
+        self.negative_prompt = negative_prompt
 
     def build_t2i_workflow(self, prompt, width=1024, height=1024, seed=None):
         """Build a text-to-image workflow for Qwen-Image.
@@ -77,11 +79,11 @@ class WorkflowBuilder:
                     "clip": ["3", 0],
                 },
             },
-            # Negative prompt (empty — CFG=1.0 ignores this)
+            # Negative prompt — steers away from non-photorealistic styles
             "5": {
                 "class_type": "CLIPTextEncode",
                 "inputs": {
-                    "text": "",
+                    "text": self.negative_prompt,
                     "clip": ["3", 0],
                 },
             },
