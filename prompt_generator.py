@@ -53,10 +53,16 @@ Description: {vibe_description}
 
 Generate image prompts for this vibe across three categories:
 
-1. "backgrounds" — {num_assets} unique background/environment scenes (9:16 vertical portrait format).
-   These should be varied environments matching the vibe aesthetic. No people in the scene.
-   Focus on architecture, landscapes, interiors, or atmospheric settings. Composed for vertical framing.
-   Style: photorealistic photograph, natural lighting, sharp focus, ultra-detailed.
+1. "backgrounds" — {num_assets} unique portrait photography backdrop scenes (9:16 vertical portrait format).
+   Each background MUST be framed as a professional portrait photography location — the kind of spot where
+   a photographer would position a person to take a stunning portrait photo.
+   MUST have: clear central space for a subject to stand, beautiful depth-of-field bokeh in the background,
+   professional-grade natural or ambient lighting (golden hour, soft diffused light, dramatic rim lighting, etc.),
+   eye-level or slightly low camera angle for a flattering portrait perspective.
+   Focus on: ornate doorways, palace corridors, garden paths, grand staircases, arched hallways, decorated walls,
+   atmospheric interiors, scenic overlooks — all matching the vibe aesthetic.
+   NO people in the scene. The scene should feel like a photographer scouted this location specifically for portraits.
+   Style: photorealistic photograph, shallow depth of field, cinematic lighting, sharp focus on foreground, 8K quality.
 
 2. "female" — {num_assets} WOMEN'S outfit/costume prompts (9:16 vertical portrait format).
    Photorealistic product photography of a COMPLETE WOMEN'S clothing ensemble on a plain/neutral background.
