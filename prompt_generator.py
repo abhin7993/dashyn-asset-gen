@@ -59,9 +59,9 @@ Generate image prompts for this vibe across three categories:
    MUST have: clear central space for a subject to stand, beautiful depth-of-field bokeh in the background,
    professional-grade natural or ambient lighting (golden hour, soft diffused light, dramatic rim lighting, etc.),
    eye-level or slightly low camera angle for a flattering portrait perspective.
-   Focus on: ornate doorways, palace corridors, garden paths, grand staircases, arched hallways, decorated walls,
-   atmospheric interiors, scenic overlooks — all matching the vibe aesthetic.
-   NO people in the scene. The scene should feel like a photographer scouted this location specifically for portraits.
+   The locations must match the vibe aesthetic — e.g. beach vibes get tropical shores, urban vibes get city streets,
+   royal vibes get palace interiors, etc. Choose locations that naturally fit the theme.
+   NO people in the scene.
    Style: photorealistic photograph, shallow depth of field, cinematic lighting, sharp focus on foreground, 8K quality.
 
 2. "female" — {num_assets} WOMEN'S outfit/costume prompts (9:16 vertical portrait format).
