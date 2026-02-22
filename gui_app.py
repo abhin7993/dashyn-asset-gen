@@ -113,8 +113,23 @@ with st.sidebar:
     output_dir = st.text_input(
         "Output Directory",
         value="./output",
-        help="Where to save generated assets",
+        help="Where to save generated assets locally",
     )
+
+    st.divider()
+    st.header("RunPod Volume")
+    save_to_volume = st.checkbox(
+        "Save to network volume",
+        value=False,
+        help="Also save generated images to a RunPod network volume",
+    )
+    volume_path = None
+    if save_to_volume:
+        volume_path = st.text_input(
+            "Volume path",
+            value="/runpod-volume/assets",
+            help="Mount path on the worker (e.g. /runpod-volume/assets)",
+        )
 
     st.divider()
     if st.button("Clear Results", use_container_width=True):
@@ -387,14 +402,18 @@ if st.button("Generate All", type="primary", use_container_width=True):
         # Submit ALL render jobs at once — RunPod distributes across workers
         render_jobs = {}  # job_id -> {vibe_name, category}
         for vibe_name, category, prompt_text in render_tasks:
-            job_id, err = submit_run(api_key, endpoint_id, {
+            render_payload = {
                 "mode": "render_image",
                 "vibe_name": vibe_name,
                 "category": category,
                 "prompt": prompt_text,
                 "width": 576,
                 "height": 1024,
-            })
+            }
+            if save_to_volume and volume_path:
+                render_payload["save_to_volume"] = True
+                render_payload["volume_path"] = volume_path
+            job_id, err = submit_run(api_key, endpoint_id, render_payload)
             if err:
                 st.warning(f"Failed to submit {vibe_name}/{category}: {err}")
                 continue

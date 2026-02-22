@@ -44,6 +44,9 @@ COSTUME_WIDTH, COSTUME_HEIGHT = 576, 1024
 
 JPEG_QUALITY = 95  # high quality, keeps payload under RunPod's 1MB/chunk limit
 
+# Default network volume path for persistent asset storage
+DEFAULT_VOLUME_PATH = "/runpod-volume/assets"
+
 
 # ---------------------------------------------------------------------------
 # Cold-start initialization
@@ -75,6 +78,39 @@ try:
     wait_for_comfyui(timeout=300)
 except RuntimeError as e:
     logger.error("ComfyUI startup failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Volume save helper
+# ---------------------------------------------------------------------------
+def _save_to_volume(jpeg_bytes, vibe_name, category, volume_path=None, filename=None):
+    """Save JPEG bytes to network volume. Returns the saved path or None."""
+    from pathlib import Path
+
+    base = volume_path or DEFAULT_VOLUME_PATH
+    cat_dir = Path(base) / vibe_name / category
+    try:
+        cat_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("Cannot create volume dir %s: %s", cat_dir, e)
+        return None
+
+    if filename is None:
+        prefix = "bg" if category == "backgrounds" else category
+        existing = {p.name for p in cat_dir.glob(f"{prefix}_*.jpg")}
+        n = 1
+        while f"{prefix}_{n}.jpg" in existing:
+            n += 1
+        filename = f"{prefix}_{n}.jpg"
+
+    filepath = cat_dir / filename
+    try:
+        filepath.write_bytes(jpeg_bytes)
+        logger.info("Saved to volume: %s", filepath)
+        return str(filepath)
+    except OSError as e:
+        logger.warning("Failed to save to volume %s: %s", filepath, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +166,8 @@ def _render_image(job_input):
     prompt = job_input.get("prompt", "")
     width = job_input.get("width", 576)
     height = job_input.get("height", 1024)
+    save_to_volume = job_input.get("save_to_volume", False)
+    volume_path = job_input.get("volume_path")
 
     if not prompt:
         yield {"type": "error", "error": "prompt is required"}
@@ -148,15 +186,21 @@ def _render_image(job_input):
         img = Image.open(io.BytesIO(result["image_data"]))
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-        img_b64 = base64.b64encode(buf.getvalue()).decode()
+        jpeg_bytes = buf.getvalue()
+        img_b64 = base64.b64encode(jpeg_bytes).decode()
 
         logger.info("  Rendered: %s/%s (%.1f KB)", category, vibe_name, len(img_b64) / 1024)
+
+        volume_file = None
+        if save_to_volume:
+            volume_file = _save_to_volume(jpeg_bytes, vibe_name, category, volume_path=volume_path)
 
         yield {
             "type": "image",
             "category": category,
             "image_base64": img_b64,
             "vibe_name": vibe_name,
+            "volume_path": volume_file,
         }
 
     except Exception as e:
@@ -171,6 +215,8 @@ def _full_pipeline(job_input):
     vibe_name = job_input.get("vibe_name")
     vibe_description = job_input.get("vibe_description")
     num_assets = job_input.get("num_assets", 2)
+    save_to_volume = job_input.get("save_to_volume", False)
+    volume_path = job_input.get("volume_path")
 
     if not vibe_name:
         yield {"type": "error", "error": "vibe_name is required"}
@@ -241,7 +287,15 @@ def _full_pipeline(job_input):
             img = Image.open(io.BytesIO(result["image_data"]))
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-            img_b64 = base64.b64encode(buf.getvalue()).decode()
+            jpeg_bytes = buf.getvalue()
+            img_b64 = base64.b64encode(jpeg_bytes).decode()
+
+            volume_file = None
+            if save_to_volume:
+                volume_file = _save_to_volume(
+                    jpeg_bytes, vibe_name, category,
+                    volume_path=volume_path, filename=filename,
+                )
 
             yield {
                 "type": "image",
@@ -251,6 +305,7 @@ def _full_pipeline(job_input):
                 "index": idx + 1,
                 "total": len(submitted),
                 "vibe_name": vibe_name,
+                "volume_path": volume_file,
             }
             success_count += 1
         except Exception as e:
